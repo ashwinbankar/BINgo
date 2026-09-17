@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# C++ / ROS / Build outputs
+build/
+devel/
+install/
+log/
+*.o
+*.obj
+*.a
+*.lib
+
+# Editor and OS settings
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Large media / logs / sensor dumps
+*.log
+*.bag
+*.mp4
+*.avi
+*.mkv
