@@ -12,16 +12,12 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
+add_executable(dummy_twist_pub src/dummy_twist_pub.cpp)
+target_link_libraries(dummy_twist_pub rclcpp::rclcpp geometry_msgs::geometry_msgs__rosidl_typesupport_cpp)
+
+install(TARGETS
+  dummy_twist_pub
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()
