@@ -1,0 +1,20 @@
+FROM ros:lyrical-ros-base
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y \
+    git build-essential python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /lidar_ws
+RUN mkdir src && cd src \
+    && git clone https://github.com/Slamtec/sllidar_ros2.git
+
+# Patch for Lyrical: ament_target_dependencies was removed
+RUN perl -0pi -e 's/ament_target_dependencies\((\w+)\s+rclcpp\s+std_srvs\s+sensor_msgs\s*\)/target_link_libraries($1 rclcpp::rclcpp \${std_srvs_TARGETS} \${sensor_msgs_TARGETS})/g' \
+    /lidar_ws/src/sllidar_ros2/CMakeLists.txt
+
+RUN source /opt/ros/lyrical/setup.bash \
+    && colcon build --packages-select sllidar_ros2 \
+       --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17
+
+ENV ROS_DOMAIN_ID=0
