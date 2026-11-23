@@ -87,25 +87,29 @@ The Teensy 4.1 node (`teensy_motor_node`) subscribes over micro-ROS (`ROS_DOMAIN
 - `/cmd_vel` (`geometry_msgs/msg/Twist`)
 - `/motor_cmd` (`std_msgs/msg/Float32MultiArray`)
 
-It drives four FIT0186 DC motors through two Cytron MDD10A drivers (`D0` = Left, `D1` = Right) with a 500 ms command-timeout watchdog.
+It drives four FIT0186 DC motors through two Cytron MDD10A drivers with a 500 ms command-timeout watchdog.
 
-### Pin Mapping (Schematic Rev. 2.0)
+### Active Pin Mapping & Calibration (Bench Firmware Override)
 
-| Motor | Position    | Driver | DIR pin | PWM pin |
-|-------|-------------|--------|---------|---------|
-| M0    | Front-Left  | D0     | 8       | 9       |
-| M1    | Rear-Left   | D0     | 10      | 11      |
-| M2    | Front-Right | D1     | 12      | 24      |
-| M3    | Rear-Right  | D1     | 25      | 28      |
+> **Wiring Note:** On the current bench harness, the `PWM` and `DIR` jumpers are swapped relative to Schematic Rev. 2.0, and the motor channels run clockwise around the chassis (`RR -> RL -> FL -> FR`). Both are compensated in `firmware/src/main.cpp` (`DIR_PINS`/`PWM_PINS` swapped, `MOTOR_POLARITY = {-1, 1, 1, -1}`, and updated `cmd_vel_callback` mixing) until the lab rewiring overhaul.
 
-### CLI Motor Tests
+| Motor | Physical Corner | Driver | DIR pin (FW) | PWM pin (FW) | Polarity |
+|-------|-----------------|--------|--------------|--------------|----------|
+| M0    | Rear-Right      | D0     | 9            | 8            | `-1`     |
+| M1    | Rear-Left       | D0     | 11           | 10           | `1`      |
+| M2    | Front-Left      | D1     | 24           | 12           | `1`      |
+| M3    | Front-Right     | D1     | 28           | 25           | `-1`     |
 
-Publish at 10 Hz to keep the watchdog active:
+### CLI Motor Tests & Teleop
+
+Publish at 10 Hz to keep the 500 ms watchdog active:
 
 ```bash
+# Holonomic keyboard teleop (repeat_rate keeps watchdog fed)
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p repeat_rate:=10.0 -p speed:=0.4 -p turn:=0.4
+
 # Mecanum twist command (all 4 motors)
 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.4}}"
 
 # Individual motor override [M0, M1, M2, M3]
 ros2 topic pub -r 10 /motor_cmd std_msgs/msg/Float32MultiArray "{data: [0.4, 0.0, 0.0, 0.0]}"
-```

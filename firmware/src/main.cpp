@@ -7,11 +7,20 @@
 #include <std_msgs/msg/float32_multi_array.h>
 
 // Teensy 4.1 Pin Mapping (Schematic Rev. 2.0)
-const uint8_t DIR_PINS[4] = {8, 10, 12, 25};   // M0_DIR, M1_DIR, M2_DIR, M3_DIR
-const uint8_t PWM_PINS[4] = {9, 11, 24, 28};   // M0_PWM, M1_PWM, M2_PWM, M3_PWM
+// Before:
+// const uint8_t DIR_PINS[4] = {8, 10, 12, 25};
+// const uint8_t PWM_PINS[4] = {9, 11, 24, 28};
+
+// After:
+const uint8_t DIR_PINS[4] = {9, 11, 24, 28};   // M0_DIR, M1_DIR, M2_DIR, M3_DIR
+const uint8_t PWM_PINS[4] = {8, 10, 12, 25};   // M0_PWM, M1_PWM, M2_PWM, M3_PWM
 
 // Flip to -1 for any motor that spins backward on a forward command
-const int8_t MOTOR_POLARITY[4] = {1, 1, 1, 1};
+// Before:
+// const int8_t MOTOR_POLARITY[4] = {1, 1, 1, 1};
+
+// After:
+const int8_t MOTOR_POLARITY[4] = {-1, 1, 1, -1};  // Invert M0 (FL) and M3 (RR)
 
 const uint8_t MAX_PWM = 160;                   // ~63% max duty for safe bench test
 const unsigned long CMD_TIMEOUT_MS = 500;      // Watchdog timeout
@@ -63,13 +72,12 @@ void cmd_vel_callback(const void * msgin) {
   float vy = twist->linear.y;
   float wz = twist->angular.z;
 
-  // Left/Right driver grouping:
-  // M0: Front-Left (D0), M1: Rear-Left (D0), M2: Front-Right (D1), M3: Rear-Right (D1)
+  // M0: Rear-Right (RR), M1: Rear-Left (RL), M2: Front-Left (FL), M3: Front-Right (FR)
   float w[4];
-  w[0] = vx - vy - wz;
-  w[1] = vx + vy - wz;
-  w[2] = vx + vy + wz;
-  w[3] = vx - vy + wz;
+  w[0] = vx - vy + wz;  // M0: RR
+  w[1] = vx + vy - wz;  // M1: RL
+  w[2] = vx - vy - wz;  // M2: FL
+  w[3] = vx + vy + wz;  // M3: FR
 
   float max_mag = 1.0f;
   for (uint8_t i = 0; i < 4; i++) {
