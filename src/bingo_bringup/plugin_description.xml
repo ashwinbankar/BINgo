@@ -1,0 +1,9 @@
+<library path="bingo_bringup">
+  <class name="bingo_bringup/BingoControlPanel"
+         type="bingo_bringup::BingoControlPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      BINgo custom control panel for LiDAR motor and 4-wheel actuation.
+    </description>
+  </class>
+</library>

@@ -1,76 +1,111 @@
 # BINgo
 
 Autonomous trash interceptor robot (MEEN 612, Texas A&M).
-Laptop (vision) -> Wi-Fi -> Raspberry Pi (micro-ROS agent in Docker) -> USB -> Teensy 4.1.
 
-## Daily use
+```
+Laptop (vision + RViz2 dashboard) --Wi-Fi--> Raspberry Pi (micro-ROS agent + LiDAR, in Docker) --USB--> Teensy 4.1
+```
 
-1. Power on the Pi with the Teensy plugged in. Wait 1-2 minutes. The agent starts by itself.
-2. On the laptop, open a new terminal and test:
+## Repository Layout
 
-    ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}}"   # LED ON
-    ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.0}}"   # LED OFF
+| Folder      | Contents                                                      |
+|-------------|---------------------------------------------------------------|
+| `pi/`       | Dockerfiles, run scripts, `setup_pi.sh` (Pi side)             |
+| `firmware/` | Teensy PlatformIO project                                     |
+| `src/`      | ROS 2 packages: `bingo_vision`, `bingo_control`, `bingo_bringup` |
+| `docs/`     | Engineering logs                                              |
 
-## Folders
+## Daily Use (RViz2 Control Dashboard)
 
-- `pi/`       Dockerfiles, run scripts, setup_pi.sh (Pi side)
-- `firmware/` Teensy PlatformIO project
-- `src/`      ROS 2 packages (vision, control, bringup)
-- `docs/`     Engineering logs
+1. Power on the Pi with the Teensy and RPLIDAR plugged in. Wait 1-2 minutes for `bingo-agent` and `bingo-lidar` to auto-start.
+2. On the laptop, launch the dashboard:
+
+   ```bash
+   source ~/BINgo/install/setup.bash
+   ros2 launch bingo_bringup dashboard.launch.py
+   ```
+
+This opens RViz2 with `/scan` visualized and the docked **BingoControlPanel**:
+
+- **Start LiDAR / Stop LiDAR**: calls `/start_motor` and `/stop_motor` to save battery when scanning isn't needed.
+- **M0-M3 sliders** (`-1.0` to `1.0`): set individual motor speed and direction, published at 10 Hz on `/motor_cmd`.
+- **STOP ALL MOTORS**: zeroes all sliders and cuts motor PWM immediately.
 
 ## Flash the Teensy (from the laptop)
 
-Plug the Teensy into the laptop, then:
+1. Plug the Teensy into the laptop, then run:
 
-    cd ~/BINgo/firmware && pio run -t upload
+   ```bash
+   cd ~/BINgo/firmware && pio run -t upload
+   ```
 
-Press the white button on the Teensy when Teensy Loader asks. Move the cable back to the Pi.
+2. Press the white button on the Teensy when Teensy Loader asks.
+3. Move the cable back to the Pi. It reconnects automatically within ~15 seconds.
 
-## Set up a fresh Pi
+## Set Up a Fresh Pi
 
-    scp -r ~/BINgo/pi <user>@<pi-ip>:~/bingo-pi
-    ssh <user>@<pi-ip> "cd ~/bingo-pi && ./setup_pi.sh"
+```bash
+scp -r ~/BINgo/pi <user>@<pi-ip>:~/bingo-pi
+ssh <user>@<pi-ip> "cd ~/bingo-pi && ./setup_pi.sh"
+```
 
-(Not yet tested on a blank Pi.)
+> Not yet tested on a blank Pi.
 
 ## Troubleshooting
 
 - Agent log (on the Pi): `sudo docker logs -f bingo-agent`
-- ROS domain must be 0 everywhere.
+- LiDAR log (on the Pi): `sudo docker logs -f bingo-lidar`
+- ROS domain must be `0` everywhere.
 - Teensy not connecting: check the agent is running (`sudo docker ps`), then wait 15 seconds.
-- Don't press the Teensy button to reset it. It enters bootloader mode. Replug the USB cable instead.
+- Don't press the Teensy button to reset it, because it enters bootloader mode. Replug the USB cable instead.
 
 ## LiDAR (RPLIDAR A1)
 
-Plug the LiDAR's USB adapter into a Pi USB port. The driver runs in Docker (`bingo-lidar`), starts on boot, and publishes `/scan`.
+Plug the LiDAR's USB adapter into a Pi USB port. The driver runs in Docker (`bingo-lidar`), starts on boot, and publishes `/scan` (~6 Hz over Wi-Fi).
 
-Check on the laptop:
+CLI checks and motor standby controls (on the laptop):
 
-    ros2 topic hz /scan        # about 6 Hz over Wi-Fi
-
-View it in RViz:
-
-    rviz2
-
-Set Fixed Frame to `laser`, then Add -> By topic -> `/scan` -> LaserScan. If you see nothing, set Reliability Policy to Best Effort.
+```bash
+ros2 topic hz /scan
+ros2 service call /stop_motor std_srvs/srv/Empty
+ros2 service call /start_motor std_srvs/srv/Empty
+```
 
 Notes:
 
-- Use a 5V 3A power supply for the Pi. A weak supply gives "Can not start scan" in the driver log. Check with `vcgencmd get_throttled` (want `0x0`).
-- Driver log (on the Pi): `sudo docker logs -f bingo-lidar`
-- Rebuild the image (on the Pi): `cd ~/bingo-pi && sudo docker build -f Dockerfile.lidar -t bingo-lidar:auto . && ./run_lidar.sh`
+- Use a 5V 3A power supply (or buck converter) for the Pi. A weak supply causes `"Can not start scan"` in the driver log. Check with `vcgencmd get_throttled` (you want `0x0`).
+- Rebuild the image (on the Pi):
+
+  ```bash
+  cd ~/bingo-pi && sudo docker build -f Dockerfile.lidar -t bingo-lidar:auto . && ./run_lidar.sh
+  ```
 
 ## Motor Control (4-Motor Mecanum Bench Bring-Up)
 
-The Teensy 4.1 node (`teensy_motor_node`) subscribes to `/cmd_vel` (`geometry_msgs/msg/Twist`) over micro-ROS (`ROS_DOMAIN_ID=0`) and drives four FIT0186 DC motors through two Cytron MDD10A drivers (`D0` = Left, `D1` = Right) with a 500 ms command timeout watchdog.
+The Teensy 4.1 node (`teensy_motor_node`) subscribes over micro-ROS (`ROS_DOMAIN_ID=0`) to:
+
+- `/cmd_vel` (`geometry_msgs/msg/Twist`)
+- `/motor_cmd` (`std_msgs/msg/Float32MultiArray`)
+
+It drives four FIT0186 DC motors through two Cytron MDD10A drivers (`D0` = Left, `D1` = Right) with a 500 ms command-timeout watchdog.
 
 ### Pin Mapping (Schematic Rev. 2.0)
-- **M0 (Front-Left, D0):** `DIR = Pin 8`, `PWM = Pin 9`
-- **M1 (Rear-Left, D0):** `DIR = Pin 10`, `PWM = Pin 11`
-- **M2 (Front-Right, D1):** `DIR = Pin 12`, `PWM = Pin 24`
-- **M3 (Rear-Right, D1):** `DIR = Pin 25`, `PWM = Pin 28`
 
-### Running a Motor Test
-Publish at 10 Hz from the workstation to keep the 500 ms watchdog active (press `Ctrl+C` to stop all motors):
+| Motor | Position    | Driver | DIR pin | PWM pin |
+|-------|-------------|--------|---------|---------|
+| M0    | Front-Left  | D0     | 8       | 9       |
+| M1    | Rear-Left   | D0     | 10      | 11      |
+| M2    | Front-Right | D1     | 12      | 24      |
+| M3    | Rear-Right  | D1     | 25      | 28      |
+
+### CLI Motor Tests
+
+Publish at 10 Hz to keep the watchdog active:
+
 ```bash
+# Mecanum twist command (all 4 motors)
 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.4}}"
+
+# Individual motor override [M0, M1, M2, M3]
+ros2 topic pub -r 10 /motor_cmd std_msgs/msg/Float32MultiArray "{data: [0.4, 0.0, 0.0, 0.0]}"
+```
