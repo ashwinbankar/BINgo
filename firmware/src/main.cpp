@@ -13,6 +13,7 @@
 // IMU
 Adafruit_MPU6050 mpu;
 bool mpu_ok = false;
+float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
 
 // Teensy 4.1 Pin Mapping (Schematic Rev. 2.0)
 // Mapped to: M0 = FL, M1 = FR, M2 = RR, M3 = RL (matches Schematic Rev. 2.0)
@@ -66,6 +67,29 @@ void stop_all_motors() {
   digitalWrite(LED_BUILTIN, LOW);
 }
 
+void calibrate_gyro() {
+  if (!mpu_ok) return;
+
+  // Solid LED indicates 2-second stationary calibration — do not move robot
+  digitalWrite(LED_BUILTIN, HIGH);
+  const int SAMPLES = 200;
+  float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
+
+  for (int i = 0; i < SAMPLES; i++) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    sum_x += g.gyro.x;
+    sum_y += g.gyro.y;
+    sum_z += g.gyro.z;
+    delay(10);
+  }
+
+  gyro_bias[0] = sum_x / SAMPLES;
+  gyro_bias[1] = sum_y / SAMPLES;
+  gyro_bias[2] = sum_z / SAMPLES;
+  digitalWrite(LED_BUILTIN, LOW);
+}
+
 void cmd_vel_callback(const void * msgin) {
   const geometry_msgs__msg__Twist * twist = (const geometry_msgs__msg__Twist *)msgin;
   last_cmd_ms = millis();
@@ -74,12 +98,12 @@ void cmd_vel_callback(const void * msgin) {
   float vy = twist->linear.y;
   float wz = twist->angular.z;
 
-// M0: Front-Left (FL), M1: Front-Right (FR), M2: Rear-Right (RR), M3: Rear-Left (RL)
-float w[4];
-w[0] = vx - vy - wz;  // M0: FL
-w[1] = vx + vy + wz;  // M1: FR
-w[2] = vx - vy + wz;  // M2: RR
-w[3] = vx + vy - wz;  // M3: RL
+  // M0: Front-Left (FL), M1: Front-Right (FR), M2: Rear-Right (RR), M3: Rear-Left (RL)
+  float w[4];
+  w[0] = vx - vy - wz;  // M0: FL
+  w[1] = vx + vy + wz;  // M1: FR
+  w[2] = vx - vy + wz;  // M2: RR
+  w[3] = vx + vy - wz;  // M3: RL
 
   float max_mag = 1.0f;
   for (uint8_t i = 0; i < 4; i++) {
@@ -112,21 +136,17 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
-  // Frame ID
-  imu_msg.header.frame_id.data = (char *)"imu_link";
-  imu_msg.header.frame_id.size = 8;
-  imu_msg.header.frame_id.capacity = 9;
-
-  // Orientation not computed on Teensy (-1 tells ROS to ignore it)
-  imu_msg.orientation_covariance[0] = -1.0;
-
-  // Angular velocity (rad/s) and linear acceleration (m/s^2)
-  imu_msg.angular_velocity.x = g.gyro.x;
-  imu_msg.angular_velocity.y = g.gyro.y;
-  imu_msg.angular_velocity.z = g.gyro.z;
+  // Bias-corrected angular velocity (rad/s) and raw linear acceleration (m/s^2)
+  imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
+  imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];
+  imu_msg.angular_velocity.z = g.gyro.z - gyro_bias[2];
   imu_msg.linear_acceleration.x = a.acceleration.x;
   imu_msg.linear_acceleration.y = a.acceleration.y;
   imu_msg.linear_acceleration.z = a.acceleration.z;
+
+  int64_t time_ns = rmw_uros_epoch_nanos();
+  imu_msg.header.stamp.sec = (int32_t)(time_ns / 1000000000LL);
+  imu_msg.header.stamp.nanosec = (uint32_t)(time_ns % 1000000000LL);
 
   rcl_publish(&imu_publisher, &imu_msg, NULL);
 }
@@ -156,16 +176,35 @@ bool create_entities() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
       "/imu/data_raw") != RCL_RET_OK) return false;
 
+  // Static IMU message fields & covariance diagonals
+  imu_msg.header.frame_id.data = (char *)"imu_link";
+  imu_msg.header.frame_id.size = 8;
+  imu_msg.header.frame_id.capacity = 9;
+
+  // Orientation not computed on Teensy (-1 tells ROS/Madgwick/EKF to ignore it)
+  imu_msg.orientation_covariance[0] = -1.0;
+
+  // Realistic MPU-6050 diagonal variances (rad^2/s^2 and m^2/s^4)
+  imu_msg.angular_velocity_covariance[0] = 0.001;
+  imu_msg.angular_velocity_covariance[4] = 0.001;
+  imu_msg.angular_velocity_covariance[8] = 0.001;
+
+  imu_msg.linear_acceleration_covariance[0] = 0.04;
+  imu_msg.linear_acceleration_covariance[4] = 0.04;
+  imu_msg.linear_acceleration_covariance[8] = 0.04;
+
   if (rclc_timer_init_default(
       &imu_timer, &support, RCL_MS_TO_NS(20), imu_timer_callback) != RCL_RET_OK) return false;
 
-  // Increased handle count from 1 to 2 for both subscriptions
+  // 3 handles: 2 motor subscriptions + 1 IMU timer
   if (rclc_executor_init(&executor, &support.context, 3, &allocator) != RCL_RET_OK) return false;
   if (rclc_executor_add_timer(&executor, &imu_timer) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &subscriber, &msg, &cmd_vel_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &motor_subscriber, &motor_msg, &motor_cmd_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
 
   last_cmd_ms = millis();
+  // Sync Teensy clock with the Pi micro-ROS agent (1000 ms timeout)
+  rmw_uros_sync_session(1000);
   return true;
 }
 
@@ -194,10 +233,11 @@ void setup() {
   Wire.begin();
   mpu_ok = mpu.begin(0x68, &Wire);
   if (mpu_ok) {
-  mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-}
+    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    calibrate_gyro();
+  }
 
   Serial.begin(115200);
   set_microros_serial_transports(Serial);

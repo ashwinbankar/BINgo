@@ -46,7 +46,7 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
-install(DIRECTORY launch rviz
+install(DIRECTORY launch rviz urdf meshes
   DESTINATION share/${PROJECT_NAME}
   OPTIONAL
 )

@@ -5,13 +5,38 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    rviz_config = os.path.join(
-        get_package_share_directory('bingo_bringup'),
-        'rviz',
-        'bingo.rviz'
-    )
+    pkg_share = get_package_share_directory('bingo_bringup')
+    rviz_config = os.path.join(pkg_share, 'rviz', 'bingo.rviz')
+    urdf_file = os.path.join(pkg_share, 'urdf', 'bingo.urdf')
+
+    with open(urdf_file, 'r') as f:
+        robot_description = f.read()
 
     return LaunchDescription([
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='robot_state_publisher',
+            output='screen',
+            parameters=[{'robot_description': robot_description}]
+        ),
+        Node(
+            package='joint_state_publisher',
+            executable='joint_state_publisher',
+            name='joint_state_publisher',
+            output='screen'
+        ),
+        Node(
+            package='imu_filter_madgwick',
+            executable='imu_filter_madgwick_node',
+            name='imu_filter_madgwick',
+            output='screen',
+            parameters=[{
+                'use_mag': False,
+                'publish_tf': False,
+                'world_frame': 'enu',
+            }]
+        ),
         Node(
             package='rviz2',
             executable='rviz2',
