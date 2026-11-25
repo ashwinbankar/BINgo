@@ -5,15 +5,25 @@
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
 #include <std_msgs/msg/float32_multi_array.h>
+#include <std_msgs/msg/int32_multi_array.h>
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <sensor_msgs/msg/imu.h>
+#include <Encoder.h>
 
 // IMU
 Adafruit_MPU6050 mpu;
 bool mpu_ok = false;
 float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
+
+Encoder enc[4] = {
+  Encoder(0, 1),  // E0
+  Encoder(2, 3),  // E1
+  Encoder(4, 5),  // E2
+  Encoder(6, 7)   // E3
+};
+const int8_t ENC_POLARITY[4] = {-1, 1, 1, -1};
 
 // Teensy 4.1 Pin Mapping (Schematic Rev. 2.0)
 // Mapped to: M0 = FL, M1 = FR, M2 = RR, M3 = RL (matches Schematic Rev. 2.0)
@@ -27,6 +37,9 @@ const unsigned long CMD_TIMEOUT_MS = 500;      // Watchdog timeout
 
 rcl_publisher_t imu_publisher;
 sensor_msgs__msg__Imu imu_msg;
+rcl_publisher_t ticks_publisher;
+std_msgs__msg__Int32MultiArray ticks_msg;
+int32_t ticks_buffer[4] = {0, 0, 0, 0};
 rcl_timer_t imu_timer;
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
@@ -131,24 +144,32 @@ void motor_cmd_callback(const void * msgin) {
 
 void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   (void) last_call_time;
-  if (timer == NULL || !mpu_ok) return;
+  if (timer == NULL) return;
 
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
+  if (mpu_ok) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
 
-  // Bias-corrected angular velocity (rad/s) and raw linear acceleration (m/s^2)
-  imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
-  imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];
-  imu_msg.angular_velocity.z = g.gyro.z - gyro_bias[2];
-  imu_msg.linear_acceleration.x = a.acceleration.x;
-  imu_msg.linear_acceleration.y = a.acceleration.y;
-  imu_msg.linear_acceleration.z = a.acceleration.z;
+    // Bias-corrected angular velocity (rad/s) and raw linear acceleration (m/s^2)
+    imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
+    imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];
+    imu_msg.angular_velocity.z = g.gyro.z - gyro_bias[2];
+    imu_msg.linear_acceleration.x = a.acceleration.x;
+    imu_msg.linear_acceleration.y = a.acceleration.y;
+    imu_msg.linear_acceleration.z = a.acceleration.z;
 
-  int64_t time_ns = rmw_uros_epoch_nanos();
-  imu_msg.header.stamp.sec = (int32_t)(time_ns / 1000000000LL);
-  imu_msg.header.stamp.nanosec = (uint32_t)(time_ns % 1000000000LL);
+    int64_t time_ns = rmw_uros_epoch_nanos();
+    imu_msg.header.stamp.sec = (int32_t)(time_ns / 1000000000LL);
+    imu_msg.header.stamp.nanosec = (uint32_t)(time_ns % 1000000000LL);
 
-  rcl_publish(&imu_publisher, &imu_msg, NULL);
+    rcl_publish(&imu_publisher, &imu_msg, NULL);
+  }
+
+  // Publish isolated E3 tick count at 50 Hz (indices 0-2 held at 0)
+  for (uint8_t i = 0; i < 4; i++) {
+    ticks_buffer[i] = (int32_t)(enc[i].read() * ENC_POLARITY[i]);
+  }
+  rcl_publish(&ticks_publisher, &ticks_msg, NULL);
 }
 
 bool create_entities() {
@@ -176,6 +197,16 @@ bool create_entities() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
       "/imu/data_raw") != RCL_RET_OK) return false;
 
+  // Bind pre-allocated buffer for /wheel_ticks
+  ticks_msg.data.data = ticks_buffer;
+  ticks_msg.data.size = 4;
+  ticks_msg.data.capacity = 4;
+
+  if (rclc_publisher_init_default(
+      &ticks_publisher, &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
+      "/wheel_ticks") != RCL_RET_OK) return false;
+
   // Static IMU message fields & covariance diagonals
   imu_msg.header.frame_id.data = (char *)"imu_link";
   imu_msg.header.frame_id.size = 8;
@@ -196,7 +227,7 @@ bool create_entities() {
   if (rclc_timer_init_default(
       &imu_timer, &support, RCL_MS_TO_NS(20), imu_timer_callback) != RCL_RET_OK) return false;
 
-  // 3 handles: 2 motor subscriptions + 1 IMU timer
+  // 3 handles: 2 motor subscriptions + 1 shared 50 Hz sensor timer
   if (rclc_executor_init(&executor, &support.context, 3, &allocator) != RCL_RET_OK) return false;
   if (rclc_executor_add_timer(&executor, &imu_timer) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &subscriber, &msg, &cmd_vel_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
@@ -205,6 +236,12 @@ bool create_entities() {
   last_cmd_ms = millis();
   // Sync Teensy clock with the Pi micro-ROS agent (1000 ms timeout)
   rmw_uros_sync_session(1000);
+
+  // Zero out any power-up noise burst once connected to the agent
+  for (uint8_t i = 0; i < 4; i++) {
+    enc[i].write(0);
+  }
+
   return true;
 }
 
@@ -216,6 +253,7 @@ void destroy_entities() {
   rcl_subscription_fini(&motor_subscriber, &node);
   rcl_timer_fini(&imu_timer);
   rcl_publisher_fini(&imu_publisher, &node);
+  rcl_publisher_fini(&ticks_publisher, &node);
   rclc_executor_fini(&executor);
   rcl_node_fini(&node);
   rclc_support_fini(&support);
