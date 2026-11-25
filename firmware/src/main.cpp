@@ -5,26 +5,28 @@
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
 #include <std_msgs/msg/float32_multi_array.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <sensor_msgs/msg/imu.h>
+
+// IMU
+Adafruit_MPU6050 mpu;
+bool mpu_ok = false;
 
 // Teensy 4.1 Pin Mapping (Schematic Rev. 2.0)
-// Before:
-// const uint8_t DIR_PINS[4] = {8, 10, 12, 25};
-// const uint8_t PWM_PINS[4] = {9, 11, 24, 28};
+// Mapped to: M0 = FL, M1 = FR, M2 = RR, M3 = RL (matches Schematic Rev. 2.0)
+const uint8_t DIR_PINS[4] = {10, 8, 12, 25};
+const uint8_t PWM_PINS[4] = {11, 9, 24, 28};
 
-// After:
-const uint8_t DIR_PINS[4] = {9, 11, 24, 28};   // M0_DIR, M1_DIR, M2_DIR, M3_DIR
-const uint8_t PWM_PINS[4] = {8, 10, 12, 25};   // M0_PWM, M1_PWM, M2_PWM, M3_PWM
-
-// Flip to -1 for any motor that spins backward on a forward command
-// Before:
-// const int8_t MOTOR_POLARITY[4] = {1, 1, 1, 1};
-
-// After:
-const int8_t MOTOR_POLARITY[4] = {-1, 1, 1, -1};  // Invert M0 (FL) and M3 (RR)
-
-const uint8_t MAX_PWM = 160;                   // ~63% max duty for safe bench test
+// Baseline polarity for dry-run check
+const int8_t MOTOR_POLARITY[4] = {1, -1, -1, 1};
+const uint8_t MAX_PWM = 255;                   // Keep 160 ~63% max duty for safe bench test and 255 for ~100% duty
 const unsigned long CMD_TIMEOUT_MS = 500;      // Watchdog timeout
 
+rcl_publisher_t imu_publisher;
+sensor_msgs__msg__Imu imu_msg;
+rcl_timer_t imu_timer;
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
 rcl_subscription_t motor_subscriber;
@@ -72,12 +74,12 @@ void cmd_vel_callback(const void * msgin) {
   float vy = twist->linear.y;
   float wz = twist->angular.z;
 
-  // M0: Rear-Right (RR), M1: Rear-Left (RL), M2: Front-Left (FL), M3: Front-Right (FR)
-  float w[4];
-  w[0] = vx - vy + wz;  // M0: RR
-  w[1] = vx + vy - wz;  // M1: RL
-  w[2] = vx - vy - wz;  // M2: FL
-  w[3] = vx + vy + wz;  // M3: FR
+// M0: Front-Left (FL), M1: Front-Right (FR), M2: Rear-Right (RR), M3: Rear-Left (RL)
+float w[4];
+w[0] = vx - vy - wz;  // M0: FL
+w[1] = vx + vy + wz;  // M1: FR
+w[2] = vx - vy + wz;  // M2: RR
+w[3] = vx + vy - wz;  // M3: RL
 
   float max_mag = 1.0f;
   for (uint8_t i = 0; i < 4; i++) {
@@ -103,6 +105,32 @@ void motor_cmd_callback(const void * msgin) {
   digitalWrite(LED_BUILTIN, any_active ? HIGH : LOW);
 }
 
+void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+  (void) last_call_time;
+  if (timer == NULL || !mpu_ok) return;
+
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  // Frame ID
+  imu_msg.header.frame_id.data = (char *)"imu_link";
+  imu_msg.header.frame_id.size = 8;
+  imu_msg.header.frame_id.capacity = 9;
+
+  // Orientation not computed on Teensy (-1 tells ROS to ignore it)
+  imu_msg.orientation_covariance[0] = -1.0;
+
+  // Angular velocity (rad/s) and linear acceleration (m/s^2)
+  imu_msg.angular_velocity.x = g.gyro.x;
+  imu_msg.angular_velocity.y = g.gyro.y;
+  imu_msg.angular_velocity.z = g.gyro.z;
+  imu_msg.linear_acceleration.x = a.acceleration.x;
+  imu_msg.linear_acceleration.y = a.acceleration.y;
+  imu_msg.linear_acceleration.z = a.acceleration.z;
+
+  rcl_publish(&imu_publisher, &imu_msg, NULL);
+}
+
 bool create_entities() {
   allocator = rcl_get_default_allocator();
   if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK) return false;
@@ -123,8 +151,17 @@ bool create_entities() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "/motor_cmd") != RCL_RET_OK) return false;
 
+  if (rclc_publisher_init_default(
+      &imu_publisher, &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+      "/imu/data_raw") != RCL_RET_OK) return false;
+
+  if (rclc_timer_init_default(
+      &imu_timer, &support, RCL_MS_TO_NS(20), imu_timer_callback) != RCL_RET_OK) return false;
+
   // Increased handle count from 1 to 2 for both subscriptions
-  if (rclc_executor_init(&executor, &support.context, 2, &allocator) != RCL_RET_OK) return false;
+  if (rclc_executor_init(&executor, &support.context, 3, &allocator) != RCL_RET_OK) return false;
+  if (rclc_executor_add_timer(&executor, &imu_timer) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &subscriber, &msg, &cmd_vel_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &motor_subscriber, &motor_msg, &motor_cmd_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
 
@@ -138,6 +175,8 @@ void destroy_entities() {
   (void) rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
   rcl_subscription_fini(&subscriber, &node);
   rcl_subscription_fini(&motor_subscriber, &node);
+  rcl_timer_fini(&imu_timer);
+  rcl_publisher_fini(&imu_publisher, &node);
   rclc_executor_fini(&executor);
   rcl_node_fini(&node);
   rclc_support_fini(&support);
@@ -151,6 +190,14 @@ void setup() {
     analogWriteFrequency(PWM_PINS[i], 20000);
   }
   stop_all_motors();
+
+  Wire.begin();
+  mpu_ok = mpu.begin(0x68, &Wire);
+  if (mpu_ok) {
+  mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+}
 
   Serial.begin(115200);
   set_microros_serial_transports(Serial);

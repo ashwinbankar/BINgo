@@ -29,7 +29,7 @@ BingoControlPanel::BingoControlPanel(QWidget * parent)
   main_layout->addSpacing(8);
   main_layout->addWidget(new QLabel("<b>Motor Speed & Direction (-1.0 to 1.0)</b>"));
 
-  const char * names[4] = {"M0 (FL)", "M1 (RL)", "M2 (FR)", "M3 (RR)"};
+  const char * names[4] = {"M0 (FL)", "M1 (FR)", "M2 (RR)", "M3 (RL)"};
   for (int i = 0; i < 4; ++i) {
     auto * row = new QHBoxLayout;
     auto * name_lbl = new QLabel(names[i]);
