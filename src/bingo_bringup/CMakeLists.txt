@@ -8,6 +8,7 @@ endif()
 set(CMAKE_AUTOMOC ON)
 
 find_package(ament_cmake REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(rclcpp REQUIRED)
@@ -30,6 +31,7 @@ target_link_libraries(${PROJECT_NAME}
   pluginlib::pluginlib
   rclcpp::rclcpp
   rviz_common::rviz_common
+  ${nav_msgs_TARGETS}
   ${std_msgs_TARGETS}
   ${std_srvs_TARGETS}
 )

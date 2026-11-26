@@ -4,6 +4,7 @@
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
+#include <std_msgs/msg/bool.h>
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/int32_multi_array.h>
 #include <Wire.h>
@@ -17,23 +18,50 @@ Adafruit_MPU6050 mpu;
 bool mpu_ok = false;
 float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
 
+// Quadrature Encoders (Direct 3.3V on pins 0-7)
 Encoder enc[4] = {
-  Encoder(0, 1),  // E0
-  Encoder(2, 3),  // E1
-  Encoder(4, 5),  // E2
-  Encoder(6, 7)   // E3
+  Encoder(0, 1),  // E0: FL
+  Encoder(2, 3),  // E1: FR
+  Encoder(4, 5),  // E2: RR
+  Encoder(6, 7)   // E3: RL
 };
 const int8_t ENC_POLARITY[4] = {-1, 1, 1, -1};
 
 // Teensy 4.1 Pin Mapping (Schematic Rev. 2.0)
-// Mapped to: M0 = FL, M1 = FR, M2 = RR, M3 = RL (matches Schematic Rev. 2.0)
+// M0 = FL, M1 = FR, M2 = RR, M3 = RL
 const uint8_t DIR_PINS[4] = {10, 8, 12, 25};
 const uint8_t PWM_PINS[4] = {11, 9, 24, 28};
-
-// Baseline polarity for dry-run check
 const int8_t MOTOR_POLARITY[4] = {1, -1, -1, 1};
-const uint8_t MAX_PWM = 255;                   // Keep 160 ~63% max duty for safe bench test and 255 for ~100% duty
-const unsigned long CMD_TIMEOUT_MS = 500;      // Watchdog timeout
+const uint8_t MAX_PWM = 255;
+const unsigned long CMD_TIMEOUT_MS = 500;
+
+// Locked Kinematics & Encoder Constants
+const float TICKS_PER_REV   = 979.0f;
+const float RAD_PER_TICK    = 6.28318530718f / TICKS_PER_REV;
+const float WHEEL_RADIUS    = 0.0330f;          // m (66 mm OD)
+const float LX              = 0.08875f;         // m (half-wheelbase)
+const float LY              = 0.1270f;          // m (half-track)
+const float L_SUM           = LX + LY;          // 0.21575 m
+const float MAX_WHEEL_RAD_S = 28.0f;            // Closed-loop cap (~0.924 m/s)
+
+// Stage 1: Universal Trapezoidal Velocity Profiler (rad/s)
+const float CONTROL_DT        = 0.02f;          // 50 Hz nominal
+const float WHEEL_ACCEL_LIMIT = 56.0f;          // rad/s^2 (0 -> 28 in 0.50 s)
+const float WHEEL_DECEL_LIMIT = 84.0f;          // rad/s^2 (28 -> 0 in 0.33 s)
+float target_rad_s[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+float ramped_rad_s[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+// Stage 2: Per-Wheel Velocity Feedforward + PID (Starter Bench Gains)
+const float K_FF    = 0.0315f;                  // 1.0 / 31.76 rad/s (measured no-load)
+const float K_P     = 0.015f;                   // norm / (rad/s)
+const float K_I     = 0.080f;                   // norm / rad
+const float K_D     = 0.000f;                   // norm * s / rad
+const float I_CLAMP = 0.40f;                    // Anti-windup clamp (max +-40% PWM)
+
+int32_t prev_ticks[4]     = {0, 0, 0, 0};
+float pid_integral[4]     = {0.0f, 0.0f, 0.0f, 0.0f};
+float pid_prev_error[4]   = {0.0f, 0.0f, 0.0f, 0.0f};
+unsigned long last_ctrl_us = 0;
 
 rcl_publisher_t imu_publisher;
 sensor_msgs__msg__Imu imu_msg;
@@ -41,11 +69,15 @@ rcl_publisher_t ticks_publisher;
 std_msgs__msg__Int32MultiArray ticks_msg;
 int32_t ticks_buffer[4] = {0, 0, 0, 0};
 rcl_timer_t imu_timer;
+
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
 rcl_subscription_t motor_subscriber;
 std_msgs__msg__Float32MultiArray motor_msg;
 float motor_msg_buffer[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+rcl_subscription_t estop_subscriber;
+std_msgs__msg__Bool estop_msg;
+
 rclc_executor_t executor;
 rclc_support_t support;
 rcl_allocator_t allocator;
@@ -80,6 +112,16 @@ void stop_all_motors() {
   digitalWrite(LED_BUILTIN, LOW);
 }
 
+void hard_stop_all_motors() {
+  for (uint8_t i = 0; i < 4; i++) {
+    target_rad_s[i] = 0.0f;
+    ramped_rad_s[i] = 0.0f;
+    pid_integral[i] = 0.0f;
+    pid_prev_error[i] = 0.0f;
+  }
+  stop_all_motors();
+}
+
 void calibrate_gyro() {
   if (!mpu_ok) return;
 
@@ -107,26 +149,26 @@ void cmd_vel_callback(const void * msgin) {
   const geometry_msgs__msg__Twist * twist = (const geometry_msgs__msg__Twist *)msgin;
   last_cmd_ms = millis();
 
-  float vx = twist->linear.x;
-  float vy = twist->linear.y;
-  float wz = twist->angular.z;
+  float vx = twist->linear.x;   // m/s
+  float vy = twist->linear.y;   // m/s
+  float wz = twist->angular.z;  // rad/s
 
-  // M0: Front-Left (FL), M1: Front-Right (FR), M2: Rear-Right (RR), M3: Rear-Left (RL)
+  // Physical inverse mecanum kinematics (rad/s): M0=FL, M1=FR, M2=RR, M3=RL
   float w[4];
-  w[0] = vx - vy - wz;  // M0: FL
-  w[1] = vx + vy + wz;  // M1: FR
-  w[2] = vx - vy + wz;  // M2: RR
-  w[3] = vx + vy - wz;  // M3: RL
+  w[0] = (vx - vy - L_SUM * wz) / WHEEL_RADIUS;
+  w[1] = (vx + vy + L_SUM * wz) / WHEEL_RADIUS;
+  w[2] = (vx - vy + L_SUM * wz) / WHEEL_RADIUS;
+  w[3] = (vx + vy - L_SUM * wz) / WHEEL_RADIUS;
 
-  float max_mag = 1.0f;
+  // Proportional desaturation to preserve motion direction
+  float max_mag = MAX_WHEEL_RAD_S;
   for (uint8_t i = 0; i < 4; i++) {
     if (fabsf(w[i]) > max_mag) max_mag = fabsf(w[i]);
   }
+  float scale = MAX_WHEEL_RAD_S / max_mag;
   for (uint8_t i = 0; i < 4; i++) {
-    set_motor(i, w[i] / max_mag);
+    target_rad_s[i] = w[i] * scale;
   }
-
-  digitalWrite(LED_BUILTIN, (fabsf(vx) > 0.01f || fabsf(vy) > 0.01f || fabsf(wz) > 0.01f) ? HIGH : LOW);
 }
 
 void motor_cmd_callback(const void * msgin) {
@@ -134,23 +176,35 @@ void motor_cmd_callback(const void * msgin) {
   if (arr->data.size < 4) return;
 
   last_cmd_ms = millis();
-  bool any_active = false;
   for (uint8_t i = 0; i < 4; i++) {
-    set_motor(i, arr->data.data[i]);
-    if (fabsf(arr->data.data[i]) > 0.02f) any_active = true;
+    target_rad_s[i] = constrain(arr->data.data[i], -1.0f, 1.0f) * MAX_WHEEL_RAD_S;
   }
-  digitalWrite(LED_BUILTIN, any_active ? HIGH : LOW);
+}
+
+void estop_callback(const void * msgin) {
+  const std_msgs__msg__Bool * estop = (const std_msgs__msg__Bool *)msgin;
+  if (estop->data) {
+    hard_stop_all_motors();
+  }
 }
 
 void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   (void) last_call_time;
   if (timer == NULL) return;
 
+  // Measure actual control dt
+  unsigned long now_us = micros();
+  float dt = (now_us - last_ctrl_us) * 1e-6f;
+  last_ctrl_us = now_us;
+  if (dt < 0.005f || dt > 0.1f) {
+    dt = CONTROL_DT;
+  }
+
+  // 1) Publish 50 Hz IMU data
   if (mpu_ok) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
 
-    // Bias-corrected angular velocity (rad/s) and raw linear acceleration (m/s^2)
     imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
     imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];
     imu_msg.angular_velocity.z = g.gyro.z - gyro_bias[2];
@@ -165,11 +219,54 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     rcl_publish(&imu_publisher, &imu_msg, NULL);
   }
 
-  // Publish isolated E3 tick count at 50 Hz (indices 0-2 held at 0)
+  // 2) Read & publish calibrated cumulative quadrature ticks at 50 Hz
+  int32_t curr_ticks[4];
   for (uint8_t i = 0; i < 4; i++) {
-    ticks_buffer[i] = (int32_t)(enc[i].read() * ENC_POLARITY[i]);
+    curr_ticks[i] = (int32_t)(enc[i].read() * ENC_POLARITY[i]);
+    ticks_buffer[i] = curr_ticks[i];
   }
   rcl_publish(&ticks_publisher, &ticks_msg, NULL);
+
+  // 3) Stage 1 (Trapezoidal Profiler) + Stage 2 (Closed-Loop Per-Wheel Velocity PID)
+  bool any_active = false;
+  for (uint8_t i = 0; i < 4; i++) {
+    int32_t delta_ticks = curr_ticks[i] - prev_ticks[i];
+    prev_ticks[i] = curr_ticks[i];
+    float meas_rad_s = (delta_ticks * RAD_PER_TICK) / dt;
+
+    // Slew-rate limit target_rad_s -> ramped_rad_s
+    float diff = target_rad_s[i] - ramped_rad_s[i];
+    bool accelerating = (target_rad_s[i] * ramped_rad_s[i] >= 0.0f) &&
+                        (fabsf(target_rad_s[i]) > fabsf(ramped_rad_s[i]));
+    float max_step = (accelerating ? WHEEL_ACCEL_LIMIT : WHEEL_DECEL_LIMIT) * dt;
+
+    if (fabsf(diff) <= max_step) {
+      ramped_rad_s[i] = target_rad_s[i];
+    } else {
+      ramped_rad_s[i] += (diff > 0.0f ? max_step : -max_step);
+    }
+
+    // Clean zero-stop: kill PWM and clear integrator when stopped
+    if (fabsf(target_rad_s[i]) < 0.05f && fabsf(ramped_rad_s[i]) < 0.05f) {
+      pid_integral[i] = 0.0f;
+      pid_prev_error[i] = 0.0f;
+      set_motor(i, 0.0f);
+      continue;
+    }
+
+    // Feedforward + PID
+    float error = ramped_rad_s[i] - meas_rad_s;
+    pid_integral[i] = constrain(pid_integral[i] + (K_I * error * dt), -I_CLAMP, I_CLAMP);
+    float deriv = (error - pid_prev_error[i]) / dt;
+    pid_prev_error[i] = error;
+
+    float ff  = K_FF * ramped_rad_s[i];
+    float out = constrain(ff + (K_P * error) + pid_integral[i] + (K_D * deriv), -1.0f, 1.0f);
+
+    set_motor(i, out);
+    any_active = true;
+  }
+  digitalWrite(LED_BUILTIN, any_active ? HIGH : LOW);
 }
 
 bool create_entities() {
@@ -182,7 +279,6 @@ bool create_entities() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/cmd_vel") != RCL_RET_OK) return false;
 
-  // Bind pre-allocated buffer so micro-ROS can deserialize incoming float arrays
   motor_msg.data.data = motor_msg_buffer;
   motor_msg.data.size = 0;
   motor_msg.data.capacity = 4;
@@ -192,12 +288,16 @@ bool create_entities() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "/motor_cmd") != RCL_RET_OK) return false;
 
+  if (rclc_subscription_init_default(
+        &estop_subscriber, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "/estop") != RCL_RET_OK) return false;
+
   if (rclc_publisher_init_default(
       &imu_publisher, &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
       "/imu/data_raw") != RCL_RET_OK) return false;
 
-  // Bind pre-allocated buffer for /wheel_ticks
   ticks_msg.data.data = ticks_buffer;
   ticks_msg.data.size = 4;
   ticks_msg.data.capacity = 4;
@@ -207,15 +307,12 @@ bool create_entities() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
       "/wheel_ticks") != RCL_RET_OK) return false;
 
-  // Static IMU message fields & covariance diagonals
   imu_msg.header.frame_id.data = (char *)"imu_link";
   imu_msg.header.frame_id.size = 8;
   imu_msg.header.frame_id.capacity = 9;
 
-  // Orientation not computed on Teensy (-1 tells ROS/Madgwick/EKF to ignore it)
   imu_msg.orientation_covariance[0] = -1.0;
 
-  // Realistic MPU-6050 diagonal variances (rad^2/s^2 and m^2/s^4)
   imu_msg.angular_velocity_covariance[0] = 0.001;
   imu_msg.angular_velocity_covariance[4] = 0.001;
   imu_msg.angular_velocity_covariance[8] = 0.001;
@@ -227,30 +324,33 @@ bool create_entities() {
   if (rclc_timer_init_default(
       &imu_timer, &support, RCL_MS_TO_NS(20), imu_timer_callback) != RCL_RET_OK) return false;
 
-  // 3 handles: 2 motor subscriptions + 1 shared 50 Hz sensor timer
-  if (rclc_executor_init(&executor, &support.context, 3, &allocator) != RCL_RET_OK) return false;
+  // 4 handles: 3 subscriptions (/cmd_vel, /motor_cmd, /estop) + 1 shared 50 Hz timer
+  if (rclc_executor_init(&executor, &support.context, 4, &allocator) != RCL_RET_OK) return false;
   if (rclc_executor_add_timer(&executor, &imu_timer) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &subscriber, &msg, &cmd_vel_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &motor_subscriber, &motor_msg, &motor_cmd_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
+  if (rclc_executor_add_subscription(&executor, &estop_subscriber, &estop_msg, &estop_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
 
   last_cmd_ms = millis();
-  // Sync Teensy clock with the Pi micro-ROS agent (1000 ms timeout)
   rmw_uros_sync_session(1000);
 
-  // Zero out any power-up noise burst once connected to the agent
+  hard_stop_all_motors();
   for (uint8_t i = 0; i < 4; i++) {
     enc[i].write(0);
+    prev_ticks[i] = 0;
   }
+  last_ctrl_us = micros();
 
   return true;
 }
 
 void destroy_entities() {
-  stop_all_motors();
+  hard_stop_all_motors();
   rmw_context_t * rmw_context = rcl_context_get_rmw_context(&support.context);
   (void) rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
   rcl_subscription_fini(&subscriber, &node);
   rcl_subscription_fini(&motor_subscriber, &node);
+  rcl_subscription_fini(&estop_subscriber, &node);
   rcl_timer_fini(&imu_timer);
   rcl_publisher_fini(&imu_publisher, &node);
   rcl_publisher_fini(&ticks_publisher, &node);
@@ -266,7 +366,7 @@ void setup() {
     pinMode(PWM_PINS[i], OUTPUT);
     analogWriteFrequency(PWM_PINS[i], 20000);
   }
-  stop_all_motors();
+  hard_stop_all_motors();
 
   Wire.begin();
   mpu_ok = mpu.begin(0x68, &Wire);
@@ -304,8 +404,11 @@ void loop() {
           break;
         }
       }
+      // Smooth watchdog deceleration (profiler ramps ramped_rad_s -> 0)
       if (millis() - last_cmd_ms > CMD_TIMEOUT_MS) {
-        stop_all_motors();
+        for (uint8_t i = 0; i < 4; i++) {
+          target_rad_s[i] = 0.0f;
+        }
       }
       rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
       break;

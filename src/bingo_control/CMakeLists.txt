@@ -9,15 +9,21 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 add_executable(wheel_odom_node src/wheel_odom_node.cpp)
 target_link_libraries(wheel_odom_node
   rclcpp::rclcpp
+  tf2_ros::tf2_ros
   ${std_msgs_TARGETS}
+  ${std_srvs_TARGETS}
+  ${geometry_msgs_TARGETS}
   ${nav_msgs_TARGETS}
+  ${sensor_msgs_TARGETS}
 )
 
 install(TARGETS wheel_odom_node

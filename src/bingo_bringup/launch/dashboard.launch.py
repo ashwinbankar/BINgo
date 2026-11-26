@@ -21,12 +21,6 @@ def generate_launch_description():
             parameters=[{'robot_description': robot_description}]
         ),
         Node(
-            package='joint_state_publisher',
-            executable='joint_state_publisher',
-            name='joint_state_publisher',
-            output='screen'
-        ),
-        Node(
             package='imu_filter_madgwick',
             executable='imu_filter_madgwick_node',
             name='imu_filter_madgwick',
@@ -36,6 +30,12 @@ def generate_launch_description():
                 'publish_tf': False,
                 'world_frame': 'enu',
             }]
+        ),
+        Node(
+            package='bingo_control',
+            executable='wheel_odom_node',
+            name='wheel_odom_node',
+            output='screen'
         ),
         Node(
             package='rviz2',
