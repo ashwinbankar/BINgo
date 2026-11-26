@@ -7,17 +7,7 @@
 #include <std_msgs/msg/bool.h>
 #include <std_msgs/msg/float32_multi_array.h>
 #include <std_msgs/msg/int32_multi_array.h>
-#include <Wire.h>
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
-#include <sensor_msgs/msg/imu.h>
 #include <Encoder.h>
-
-// IMU
-Adafruit_MPU6050 mpu;
-bool mpu_ok = false;
-float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
-const float GYRO_Z_DEADBAND = 0.010f;  // rad/s (~0.17 deg/s) stationary noise floor
 
 // Quadrature Encoders (Direct 3.3V on pins 0-7)
 Encoder enc[4] = {
@@ -59,17 +49,15 @@ const float K_I     = 0.080f;                   // norm / rad
 const float K_D     = 0.000f;                   // norm * s / rad
 const float I_CLAMP = 0.40f;                    // Anti-windup clamp (max +-40% PWM)
 
-int32_t prev_ticks[4]     = {0, 0, 0, 0};
-float pid_integral[4]     = {0.0f, 0.0f, 0.0f, 0.0f};
-float pid_prev_error[4]   = {0.0f, 0.0f, 0.0f, 0.0f};
+int32_t prev_ticks[4]      = {0, 0, 0, 0};
+float pid_integral[4]      = {0.0f, 0.0f, 0.0f, 0.0f};
+float pid_prev_error[4]    = {0.0f, 0.0f, 0.0f, 0.0f};
 unsigned long last_ctrl_us = 0;
 
-rcl_publisher_t imu_publisher;
-sensor_msgs__msg__Imu imu_msg;
 rcl_publisher_t ticks_publisher;
 std_msgs__msg__Int32MultiArray ticks_msg;
 int32_t ticks_buffer[4] = {0, 0, 0, 0};
-rcl_timer_t imu_timer;
+rcl_timer_t control_timer;
 
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
@@ -123,29 +111,6 @@ void hard_stop_all_motors() {
   stop_all_motors();
 }
 
-void calibrate_gyro() {
-  if (!mpu_ok) return;
-
-  // Solid LED indicates 4-second stationary calibration — keep robot completely still
-  digitalWrite(LED_BUILTIN, HIGH);
-  const int SAMPLES = 400;
-  float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
-
-  for (int i = 0; i < SAMPLES; i++) {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-    sum_x += g.gyro.x;
-    sum_y += g.gyro.y;
-    sum_z += g.gyro.z;
-    delay(10);
-  }
-
-  gyro_bias[0] = sum_x / SAMPLES;
-  gyro_bias[1] = sum_y / SAMPLES;
-  gyro_bias[2] = sum_z / SAMPLES;
-  digitalWrite(LED_BUILTIN, LOW);
-}
-
 void cmd_vel_callback(const void * msgin) {
   const geometry_msgs__msg__Twist * twist = (const geometry_msgs__msg__Twist *)msgin;
   last_cmd_ms = millis();
@@ -189,7 +154,7 @@ void estop_callback(const void * msgin) {
   }
 }
 
-void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+void control_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   (void) last_call_time;
   if (timer == NULL) return;
 
@@ -201,35 +166,7 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     dt = CONTROL_DT;
   }
 
-  // 1) Publish 50 Hz IMU data
-  if (mpu_ok) {
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
-
-    static float last_good_gz = 0.0f;
-    float gz = g.gyro.z - gyro_bias[2];
-    if (fabsf(gz) > 2.5f) {
-      gz = last_good_gz;   // glitch: hold the previous good value
-    } else if (fabsf(gz) < GYRO_Z_DEADBAND) {
-      gz = 0.0f;
-    }
-    last_good_gz = gz;
-
-    imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
-    imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];
-    imu_msg.angular_velocity.z = gz;
-    imu_msg.linear_acceleration.x = a.acceleration.x;
-    imu_msg.linear_acceleration.y = a.acceleration.y;
-    imu_msg.linear_acceleration.z = a.acceleration.z;
-
-    int64_t time_ns = rmw_uros_epoch_nanos();
-    imu_msg.header.stamp.sec = (int32_t)(time_ns / 1000000000LL);
-    imu_msg.header.stamp.nanosec = (uint32_t)(time_ns % 1000000000LL);
-
-    rcl_publish(&imu_publisher, &imu_msg, NULL);
-  }
-
-  // 2) Read & publish calibrated cumulative quadrature ticks at 50 Hz
+  // 1) Read & publish calibrated cumulative quadrature ticks at 50 Hz
   int32_t curr_ticks[4];
   for (uint8_t i = 0; i < 4; i++) {
     curr_ticks[i] = (int32_t)(enc[i].read() * ENC_POLARITY[i]);
@@ -237,7 +174,7 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   }
   rcl_publish(&ticks_publisher, &ticks_msg, NULL);
 
-  // 3) Stage 1 (Trapezoidal Profiler) + Stage 2 (Closed-Loop Per-Wheel Velocity PID)
+  // 2) Stage 1 (Trapezoidal Profiler) + Stage 2 (Closed-Loop Per-Wheel Velocity PID)
   bool any_active = false;
   for (uint8_t i = 0; i < 4; i++) {
     int32_t delta_ticks = curr_ticks[i] - prev_ticks[i];
@@ -303,11 +240,6 @@ bool create_entities() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
         "/estop") != RCL_RET_OK) return false;
 
-  if (rclc_publisher_init_default(
-      &imu_publisher, &node,
-      ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-      "/imu/data_raw") != RCL_RET_OK) return false;
-
   ticks_msg.data.data = ticks_buffer;
   ticks_msg.data.size = 4;
   ticks_msg.data.capacity = 4;
@@ -317,26 +249,12 @@ bool create_entities() {
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32MultiArray),
       "/wheel_ticks") != RCL_RET_OK) return false;
 
-  imu_msg.header.frame_id.data = (char *)"imu_link";
-  imu_msg.header.frame_id.size = 8;
-  imu_msg.header.frame_id.capacity = 9;
-
-  imu_msg.orientation_covariance[0] = -1.0;
-
-  imu_msg.angular_velocity_covariance[0] = 0.001;
-  imu_msg.angular_velocity_covariance[4] = 0.001;
-  imu_msg.angular_velocity_covariance[8] = 0.001;
-
-  imu_msg.linear_acceleration_covariance[0] = 0.04;
-  imu_msg.linear_acceleration_covariance[4] = 0.04;
-  imu_msg.linear_acceleration_covariance[8] = 0.04;
-
   if (rclc_timer_init_default(
-      &imu_timer, &support, RCL_MS_TO_NS(20), imu_timer_callback) != RCL_RET_OK) return false;
+      &control_timer, &support, RCL_MS_TO_NS(20), control_timer_callback) != RCL_RET_OK) return false;
 
-  // 4 handles: 3 subscriptions (/cmd_vel, /motor_cmd, /estop) + 1 shared 50 Hz timer
+  // 4 handles: 3 subscriptions (/cmd_vel, /motor_cmd, /estop) + 1 50 Hz control/ticks timer
   if (rclc_executor_init(&executor, &support.context, 4, &allocator) != RCL_RET_OK) return false;
-  if (rclc_executor_add_timer(&executor, &imu_timer) != RCL_RET_OK) return false;
+  if (rclc_executor_add_timer(&executor, &control_timer) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &subscriber, &msg, &cmd_vel_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &motor_subscriber, &motor_msg, &motor_cmd_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
   if (rclc_executor_add_subscription(&executor, &estop_subscriber, &estop_msg, &estop_callback, ON_NEW_DATA) != RCL_RET_OK) return false;
@@ -361,8 +279,7 @@ void destroy_entities() {
   rcl_subscription_fini(&subscriber, &node);
   rcl_subscription_fini(&motor_subscriber, &node);
   rcl_subscription_fini(&estop_subscriber, &node);
-  rcl_timer_fini(&imu_timer);
-  rcl_publisher_fini(&imu_publisher, &node);
+  rcl_timer_fini(&control_timer);
   rcl_publisher_fini(&ticks_publisher, &node);
   rclc_executor_fini(&executor);
   rcl_node_fini(&node);
@@ -377,15 +294,6 @@ void setup() {
     analogWriteFrequency(PWM_PINS[i], 20000);
   }
   hard_stop_all_motors();
-
-  Wire.begin();
-  mpu_ok = mpu.begin(0x68, &Wire);
-  if (mpu_ok) {
-    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-    calibrate_gyro();
-  }
 
   Serial.begin(115200);
   set_microros_serial_transports(Serial);

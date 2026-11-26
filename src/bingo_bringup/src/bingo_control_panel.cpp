@@ -28,7 +28,7 @@ BingoControlPanel::BingoControlPanel(QWidget * parent)
 
   // --- Odometry Telemetry & Reset ---
   main_layout->addSpacing(8);
-  main_layout->addWidget(new QLabel("<b>Odometry Telemetry (/odometry/filtered)</b>"));
+  main_layout->addWidget(new QLabel("<b>Odometry Telemetry (/wheel_odom)</b>"));
   pose_label_ = new QLabel("Pose: x=0.00 m  y=0.00 m  yaw=0.0°");
   vel_label_  = new QLabel("Vel:  vx=0.00  vy=0.00 m/s  wz=0.00 rad/s");
   auto * reset_odom_btn = new QPushButton("Reset Odometry");
@@ -87,10 +87,8 @@ void BingoControlPanel::onInitialize()
   motor_pub_ = node_->create_publisher<std_msgs::msg::Float32MultiArray>("/motor_cmd", 10);
   estop_pub_ = node_->create_publisher<std_msgs::msg::Bool>("/estop", 10);
   odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
-  "/odometry/filtered", 10,
-  std::bind(&BingoControlPanel::odomCallback, this, std::placeholders::_1));
-  set_pose_pub_ = node_->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
-  "/set_pose", 10);
+    "/wheel_odom", 10,
+    std::bind(&BingoControlPanel::odomCallback, this, std::placeholders::_1));
   start_lidar_client_ = node_->create_client<std_srvs::srv::Empty>("/start_motor");
   stop_lidar_client_  = node_->create_client<std_srvs::srv::Empty>("/stop_motor");
   reset_odom_client_  = node_->create_client<std_srvs::srv::Trigger>("/reset_odom");
@@ -139,14 +137,6 @@ void BingoControlPanel::onResetOdom()
     reset_odom_client_->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>());
   }
 
-  if (set_pose_pub_) {
-    geometry_msgs::msg::PoseWithCovarianceStamped pose_msg;
-    pose_msg.header.stamp = node_->now();
-    pose_msg.header.frame_id = "odom";
-    pose_msg.pose.pose.orientation.w = 1.0;
-    set_pose_pub_->publish(pose_msg);
-  }
-
   {
     std::lock_guard<std::mutex> lock(odom_mutex_);
     odom_x_ = 0.0;
@@ -158,7 +148,7 @@ void BingoControlPanel::onResetOdom()
   }
   pose_label_->setText("Pose: x=0.00 m  y=0.00 m  yaw=0.0°");
   vel_label_->setText("Vel:  vx=0.00  vy=0.00 m/s  wz=0.00 rad/s");
-  status_label_->setText("Status: Odometry & EKF Reset");
+  status_label_->setText("Status: Odometry Reset");
 }
 
 void BingoControlPanel::onStopAllMotors()

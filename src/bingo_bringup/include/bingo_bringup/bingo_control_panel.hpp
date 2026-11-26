@@ -16,7 +16,6 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include <std_srvs/srv/trigger.hpp>
-#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 namespace bingo_bringup
 {
@@ -62,7 +61,6 @@ private:
   rclcpp::Client<std_srvs::srv::Empty>::SharedPtr start_lidar_client_;
   rclcpp::Client<std_srvs::srv::Empty>::SharedPtr stop_lidar_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr reset_odom_client_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr set_pose_pub_;
 };
 
 }  // namespace bingo_bringup

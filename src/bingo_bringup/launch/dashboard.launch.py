@@ -8,7 +8,6 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('bingo_bringup')
     rviz_config = os.path.join(pkg_share, 'rviz', 'bingo.rviz')
     urdf_file = os.path.join(pkg_share, 'urdf', 'bingo.urdf')
-    ekf_config = os.path.join(pkg_share, 'config', 'ekf.yaml')
 
     with open(urdf_file, 'r') as f:
         robot_description = f.read()
@@ -19,38 +18,20 @@ def generate_launch_description():
             executable='robot_state_publisher',
             name='robot_state_publisher',
             output='screen',
-            parameters=[{'robot_description': robot_description}]
-        ),
-        Node(
-            package='imu_filter_madgwick',
-            executable='imu_filter_madgwick_node',
-            name='imu_filter_madgwick',
-            output='screen',
-            parameters=[{
-                'use_mag': False,
-                'publish_tf': False,
-                'world_frame': 'enu',
-            }]
+            parameters=[{'robot_description': robot_description}],
         ),
         Node(
             package='bingo_control',
             executable='wheel_odom_node',
             name='wheel_odom_node',
             output='screen',
-            parameters=[{'publish_tf': False}]
-        ),
-        Node(
-            package='robot_localization',
-            executable='ekf_node',
-            name='ekf_filter_node',
-            output='screen',
-            parameters=[ekf_config]
+            parameters=[{'publish_tf': True}],
         ),
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2',
             arguments=['-d', rviz_config],
-            output='screen'
-        )
+            output='screen',
+        ),
     ])
