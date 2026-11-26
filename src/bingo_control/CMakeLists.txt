@@ -26,6 +26,17 @@ target_link_libraries(wheel_odom_node
   ${sensor_msgs_TARGETS}
 )
 
+add_executable(goto_goal_node src/goto_goal_node.cpp)
+target_link_libraries(goto_goal_node
+  rclcpp::rclcpp
+  ${geometry_msgs_TARGETS}
+  ${nav_msgs_TARGETS}
+)
+
+install(TARGETS wheel_odom_node goto_goal_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(TARGETS wheel_odom_node
   DESTINATION lib/${PROJECT_NAME}
 )
