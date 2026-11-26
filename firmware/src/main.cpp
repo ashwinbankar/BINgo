@@ -206,10 +206,14 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
 
+    static float last_good_gz = 0.0f;
     float gz = g.gyro.z - gyro_bias[2];
-    if (fabsf(gz) < GYRO_Z_DEADBAND) {
+    if (fabsf(gz) > 2.5f) {
+      gz = last_good_gz;   // glitch: hold the previous good value
+    } else if (fabsf(gz) < GYRO_Z_DEADBAND) {
       gz = 0.0f;
     }
+    last_good_gz = gz;
 
     imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
     imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];

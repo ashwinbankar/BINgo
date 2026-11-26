@@ -11,7 +11,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
 #include "std_srvs/srv/trigger.hpp"
-#include "tf2_ros/transform_broadcaster.h"
+#include "tf2_ros/transform_broadcaster.hpp"
 
 class WheelOdomNode : public rclcpp::Node {
 public:
@@ -22,7 +22,8 @@ public:
     ly_            = this->declare_parameter<double>("ly", 0.1270);
     odom_frame_    = this->declare_parameter<std::string>("odom_frame", "odom");
     base_frame_    = this->declare_parameter<std::string>("base_frame", "base_link");
-    publish_tf_    = this->declare_parameter<bool>("publish_tf", true);
+    // Default false: the EKF (robot_localization) owns odom -> base_link
+    publish_tf_    = this->declare_parameter<bool>("publish_tf", false);
 
     rad_per_tick_ = (2.0 * M_PI) / ticks_per_rev_;
 
@@ -40,7 +41,7 @@ public:
         &WheelOdomNode::reset_callback, this,
         std::placeholders::_1, std::placeholders::_2));
 
-    // Keep RViz2 TF and wheel joints alive at 10 Hz when Teensy is powered off
+    // Keep wheel joints alive at 10 Hz when Teensy is powered off
     idle_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(100),
       std::bind(&WheelOdomNode::idle_timer_callback, this));
@@ -129,8 +130,8 @@ private:
     }
 
     const double dt = (now - last_time_).seconds();
-    if (dt <= 1e-4) {
-      return;
+    if (dt < 0.010) {
+      return;  // burst arrival: keep prev_ticks_/last_time_ so the ticks accumulate into the next sample
     }
 
     std::array<int32_t, 4> delta{};
