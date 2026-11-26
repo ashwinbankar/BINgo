@@ -15,6 +15,7 @@ find_package(rclcpp REQUIRED)
 find_package(rviz_common REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/bingo_control_panel.cpp
@@ -34,6 +35,7 @@ target_link_libraries(${PROJECT_NAME}
   ${nav_msgs_TARGETS}
   ${std_msgs_TARGETS}
   ${std_srvs_TARGETS}
+  ${geometry_msgs_TARGETS}
 )
 
 pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
@@ -48,9 +50,9 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
-install(DIRECTORY launch rviz urdf meshes
+install(DIRECTORY
+  launch rviz urdf meshes config
   DESTINATION share/${PROJECT_NAME}
-  OPTIONAL
 )
 
 if(BUILD_TESTING)

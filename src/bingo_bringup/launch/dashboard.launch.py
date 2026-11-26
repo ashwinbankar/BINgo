@@ -8,6 +8,7 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('bingo_bringup')
     rviz_config = os.path.join(pkg_share, 'rviz', 'bingo.rviz')
     urdf_file = os.path.join(pkg_share, 'urdf', 'bingo.urdf')
+    ekf_config = os.path.join(pkg_share, 'config', 'ekf.yaml')
 
     with open(urdf_file, 'r') as f:
         robot_description = f.read()
@@ -35,7 +36,15 @@ def generate_launch_description():
             package='bingo_control',
             executable='wheel_odom_node',
             name='wheel_odom_node',
-            output='screen'
+            output='screen',
+            parameters=[{'publish_tf': False}]
+        ),
+        Node(
+            package='robot_localization',
+            executable='ekf_node',
+            name='ekf_filter_node',
+            output='screen',
+            parameters=[ekf_config]
         ),
         Node(
             package='rviz2',

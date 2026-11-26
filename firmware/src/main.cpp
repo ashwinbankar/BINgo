@@ -17,6 +17,7 @@
 Adafruit_MPU6050 mpu;
 bool mpu_ok = false;
 float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
+const float GYRO_Z_DEADBAND = 0.010f;  // rad/s (~0.17 deg/s) stationary noise floor
 
 // Quadrature Encoders (Direct 3.3V on pins 0-7)
 Encoder enc[4] = {
@@ -125,9 +126,9 @@ void hard_stop_all_motors() {
 void calibrate_gyro() {
   if (!mpu_ok) return;
 
-  // Solid LED indicates 2-second stationary calibration — do not move robot
+  // Solid LED indicates 4-second stationary calibration — keep robot completely still
   digitalWrite(LED_BUILTIN, HIGH);
-  const int SAMPLES = 200;
+  const int SAMPLES = 400;
   float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
 
   for (int i = 0; i < SAMPLES; i++) {
@@ -205,9 +206,14 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     sensors_event_t a, g, temp;
     mpu.getEvent(&a, &g, &temp);
 
+    float gz = g.gyro.z - gyro_bias[2];
+    if (fabsf(gz) < GYRO_Z_DEADBAND) {
+      gz = 0.0f;
+    }
+
     imu_msg.angular_velocity.x = g.gyro.x - gyro_bias[0];
     imu_msg.angular_velocity.y = g.gyro.y - gyro_bias[1];
-    imu_msg.angular_velocity.z = g.gyro.z - gyro_bias[2];
+    imu_msg.angular_velocity.z = gz;
     imu_msg.linear_acceleration.x = a.acceleration.x;
     imu_msg.linear_acceleration.y = a.acceleration.y;
     imu_msg.linear_acceleration.z = a.acceleration.z;
