@@ -20,9 +20,9 @@ public:
     wheel_radius_  = this->declare_parameter<double>("wheel_radius", 0.0330);
     lx_            = this->declare_parameter<double>("lx", 0.08875);
     ly_            = this->declare_parameter<double>("ly", 0.1270);
+    lateral_scale_ = this->declare_parameter<double>("lateral_scale", 0.881);
     odom_frame_    = this->declare_parameter<std::string>("odom_frame", "odom");
     base_frame_    = this->declare_parameter<std::string>("base_frame", "base_link");
-    // Default false: the EKF (robot_localization) owns odom -> base_link
     publish_tf_    = this->declare_parameter<bool>("publish_tf", false);
 
     rad_per_tick_ = (2.0 * M_PI) / ticks_per_rev_;
@@ -50,8 +50,8 @@ public:
 
     RCLCPP_INFO(
       this->get_logger(),
-      "wheel_odom_node started (TPR=%.1f, r=%.4fm, lx=%.5fm, ly=%.4fm, publish_tf=%s)",
-      ticks_per_rev_, wheel_radius_, lx_, ly_, publish_tf_ ? "true" : "false");
+      "wheel_odom_node started (TPR=%.1f, r=%.4fm, lx=%.5fm, ly=%.4fm, lateral_scale=%.3f, publish_tf=%s)",
+      ticks_per_rev_, wheel_radius_, lx_, ly_, lateral_scale_, publish_tf_ ? "true" : "false");
   }
 
 private:
@@ -168,7 +168,7 @@ private:
 
     // Forward mecanum kinematics (body frame FLU)
     const double dx_body = (wheel_radius_ / 4.0) * (d0 + d1 + d2 + d3);
-    const double dy_body = (wheel_radius_ / 4.0) * (-d0 + d1 - d2 + d3);
+    const double dy_body = lateral_scale_ * (wheel_radius_ / 4.0) * (-d0 + d1 - d2 + d3);
     const double dtheta  = (wheel_radius_ / (4.0 * (lx_ + ly_))) * (-d0 + d1 + d2 - d3);
 
     // Midpoint (RK2) integration into odom frame
@@ -221,6 +221,7 @@ private:
   double wheel_radius_;
   double lx_;
   double ly_;
+  double lateral_scale_;
   double rad_per_tick_;
   std::string odom_frame_;
   std::string base_frame_;
