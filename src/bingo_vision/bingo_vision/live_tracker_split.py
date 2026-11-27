@@ -35,8 +35,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bingo_split_common as bc
 import bingo_tracking as bt
-from check_timing_split import LatestReader
-
+try:
+    from check_timing_split import LatestReader
+except ImportError:
+    LatestReader = None
 
 # =====================================================================
 # detection helpers

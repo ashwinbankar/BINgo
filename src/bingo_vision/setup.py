@@ -25,6 +25,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'vision_tracker_node = bingo_vision.vision_tracker_node:main',
         ],
     },
 )

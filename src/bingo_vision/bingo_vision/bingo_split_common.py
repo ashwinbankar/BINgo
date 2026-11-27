@@ -1,3 +1,4 @@
+import sys
 """
 BINgo - shared code for the OBS side-by-side pipeline
 
@@ -90,7 +91,8 @@ class SplitCamera:
     """
 
     def __init__(self, index, calib_size=None):
-        self.cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+        backend = cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_V4L2
+        self.cap = cv2.VideoCapture(index, backend)
         if not self.cap.isOpened():
             raise SystemExit(f"Could not open camera {index}. Is the OBS Virtual Camera on? "
                              "Do not use --list: it steals feeds from OBS.")
